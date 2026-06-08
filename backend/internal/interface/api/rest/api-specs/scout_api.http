@@ -1,0 +1,68 @@
+### Scout API — example requests
+### Set @baseUrl to your backend. Run login first and copy the access_token.
+
+@baseUrl = http://localhost:8080
+@token = PASTE_ACCESS_TOKEN_HERE
+@photoId = PASTE_PHOTO_ID_HERE
+
+### Login as a regular user
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "login": "insect",
+  "password": "insect123"
+}
+
+### Login as admin
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "login": "admin",
+  "password": "admin123"
+}
+
+### List photos (no filter)
+GET {{baseUrl}}/api/v1/photos?limit=50
+Authorization: Bearer {{token}}
+
+### List photos filtered by class + min confidence
+GET {{baseUrl}}/api/v1/photos?classId=thrips&minConfidence=0.7
+Authorization: Bearer {{token}}
+
+### Next page (use next_token from a previous response)
+GET {{baseUrl}}/api/v1/photos?limit=20&cursor=PASTE_NEXT_TOKEN
+Authorization: Bearer {{token}}
+
+### Get a single photo
+GET {{baseUrl}}/api/v1/photos/{{photoId}}
+Authorization: Bearer {{token}}
+
+### Create a presigned upload link (admin only)
+POST {{baseUrl}}/api/v1/photos/{{photoId}}/upload-link
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "contentType": "image/jpeg"
+}
+
+### Check object existence (admin only, seeder idempotency)
+HEAD {{baseUrl}}/api/v1/photos/{{photoId}}/object
+Authorization: Bearer {{token}}
+
+### Get a thumbnail (token via query so it also works in <img>)
+GET {{baseUrl}}/api/v1/photos/{{photoId}}/thumbnail?width=640&dpr=2&quality=80&format=jpeg&token={{token}}
+
+### Get the original image
+GET {{baseUrl}}/api/v1/photos/{{photoId}}/original?token={{token}}
+
+### Health (public)
+GET {{baseUrl}}/healthz
+
+### Metrics (admin only)
+GET {{baseUrl}}/metrics?token={{token}}
+
+### Debug vars (admin only)
+GET {{baseUrl}}/debug/vars?token={{token}}

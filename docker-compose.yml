@@ -1,0 +1,73 @@
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      SERVICE_HOST: 0.0.0.0
+      SERVICE_PORT: "8080"
+      SERVICE_ENV: production
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      SQLITE_PATH: /data/predictions.db
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-scout-originals}
+      MINIO_USE_SSL: "false"
+      REDIS_ADDR: redis:6379
+      THUMBNAIL_MAX_CONCURRENCY: "2"
+      THUMBNAIL_LRU_BYTES: "134217728"
+      SEEDER_API_BASE_URL: http://backend:8080
+      SEEDER_IMAGES_DIR: /data/images
+      ADMIN_LOGIN: admin
+      ADMIN_PASSWORD: admin123
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount the dataset (SQLite + images) read-only into the container.
+      - ./dataset:/data:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_BACKEND_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  minio-data:

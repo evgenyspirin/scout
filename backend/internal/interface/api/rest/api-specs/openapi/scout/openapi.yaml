@@ -1,0 +1,344 @@
+openapi: 3.0.3
+info:
+  title: Scout API
+  version: 2.0.0
+  description: |
+    Scout is a greenhouse pest & disease monitoring service. Cameras photograph
+    the crop and an ML model detects pests/diseases (bounding boxes). Photo
+    metadata and predictions are read from a SQLite dataset; the original images
+    are ingested into object storage (MinIO) through a presigned-upload flow.
+
+    ## Auth
+    JWT bearer auth. Obtain a token from `POST /api/v1/auth/login`, then send it
+    as `Authorization: Bearer <token>`. Image endpoints (`/thumbnail`, `/original`)
+    additionally accept the token as a `?token=` query parameter so they can be
+    used directly in `<img>` tags.
+
+    Roles: `user` can browse photos; `admin` can additionally create upload links,
+    check object existence, and read `/metrics` and `/debug/vars`.
+
+    ## Bounding boxes
+    Normalized to `[0,1]` against the original image. Two corners: (xMin,yMin)
+    top-left and (xMax,yMax) bottom-right. The frontend multiplies these by the
+    ACTUAL rendered image size.
+
+    ## Errors
+    Every error response shares `request_id` and `message`, plus a machine-readable
+    `code`. Errors are shaped in one place; no stack traces are leaked.
+
+servers:
+  - url: http://localhost:8080
+    description: Local backend (Docker Compose)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Photos
+  - name: Thumbnails
+  - name: Ops
+
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      security: []
+      summary: Login and receive a JWT token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: A signed JWT
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/photos:
+    get:
+      tags: [Photos]
+      operationId: listPhotos
+      summary: List photos with predictions (cursor pagination + filters)
+      description: |
+        A photo is included when it has at least one prediction that satisfies
+        every filter passed (`classId` AND `minConfidence` must be met by the
+        SAME prediction). A matched photo always carries ALL of its predictions.
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: classId, in: query, schema: { type: string, example: powdery_mildew } }
+        - { name: minConfidence, in: query, schema: { type: number, minimum: 0, maximum: 1, example: 0.5 } }
+      responses:
+        '200':
+          description: A page of photos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PhotoPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/photos/{photoId}:
+    get:
+      tags: [Photos]
+      operationId: getPhoto
+      summary: Get a single photo with all its predictions
+      parameters:
+        - $ref: '#/components/parameters/PhotoId'
+      responses:
+        '200':
+          description: Photo
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Photo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/photos/{photoId}/upload-link:
+    post:
+      tags: [Photos]
+      operationId: createUploadLink
+      summary: Get a presigned PUT URL to upload the original bytes (admin only)
+      parameters:
+        - $ref: '#/components/parameters/PhotoId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UploadLinkRequest' }
+      responses:
+        '200':
+          description: Presigned upload link (includes `exists` for idempotency)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadLink' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/photos/{photoId}/object:
+    head:
+      tags: [Photos]
+      operationId: headObject
+      summary: Check whether the original object exists (admin only, seeder idempotency)
+      parameters:
+        - $ref: '#/components/parameters/PhotoId'
+      responses:
+        '200': { description: Object exists }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Object (or photo) not found }
+
+  /api/v1/photos/{photoId}/thumbnail:
+    get:
+      tags: [Thumbnails]
+      operationId: getThumbnail
+      summary: Get a generated/cached thumbnail
+      description: |
+        Lazily generates a thumbnail, preserving aspect ratio and never upscaling.
+        Effective width = `width * dpr`, capped by the original width. Results are
+        cached (in-memory LRU + Redis) and identical concurrent requests are
+        de-duplicated. Token may be passed via `?token=` for `<img>` usage.
+      parameters:
+        - $ref: '#/components/parameters/PhotoId'
+        - { name: width, in: query, schema: { type: integer, enum: [320, 640, 960, 1280] } }
+        - { name: dpr, in: query, schema: { type: integer, enum: [1, 2, 3] } }
+        - { name: quality, in: query, schema: { type: integer, enum: [70, 80, 90] } }
+        - { name: format, in: query, schema: { type: string, enum: [jpeg] } }
+        - { name: token, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Image bytes
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/photos/{photoId}/original:
+    get:
+      tags: [Photos]
+      operationId: getOriginal
+      summary: Stream the original image from object storage
+      parameters:
+        - $ref: '#/components/parameters/PhotoId'
+        - { name: token, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Original image bytes
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /healthz:
+    get:
+      tags: [Ops]
+      operationId: health
+      security: []
+      summary: Liveness probe (public)
+      responses:
+        '200': { description: OK }
+
+  /metrics:
+    get:
+      tags: [Ops]
+      operationId: metrics
+      summary: Prometheus metrics (admin only)
+      responses:
+        '200': { description: Prometheus exposition format }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /debug/vars:
+    get:
+      tags: [Ops]
+      operationId: debugVars
+      summary: Go expvar debug info (admin only)
+      responses:
+        '200': { description: expvar JSON }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PhotoId:
+      name: photoId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: The request was invalid.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/ValidationError' } }
+    Unauthorized:
+      description: Missing or invalid token.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/ApiError' } }
+    Forbidden:
+      description: Insufficient role.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/ApiError' } }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } }
+
+  schemas:
+    LoginRequest:
+      type: object
+      required: [login, password]
+      properties:
+        login: { type: string, example: insect }
+        password: { type: string, example: insect123 }
+
+    LoginResponse:
+      type: object
+      required: [access_token, token_type]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+
+    UploadLinkRequest:
+      type: object
+      required: [contentType]
+      properties:
+        contentType: { type: string, example: image/jpeg }
+
+    UploadLink:
+      type: object
+      required: [url, method, expiresAt, exists]
+      properties:
+        url: { type: string, format: uri }
+        method: { type: string, enum: [PUT] }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+        expiresAt: { type: string, format: date-time }
+        exists: { type: boolean, description: Whether the object already exists. }
+
+    BoundingBox:
+      type: object
+      required: [xMin, yMin, xMax, yMax]
+      properties:
+        xMin: { type: number, minimum: 0, maximum: 1 }
+        yMin: { type: number, minimum: 0, maximum: 1 }
+        xMax: { type: number, minimum: 0, maximum: 1 }
+        yMax: { type: number, minimum: 0, maximum: 1 }
+
+    Prediction:
+      type: object
+      required: [classId, confidence, bbox]
+      properties:
+        classId:
+          type: string
+          enum: [powdery_mildew, mirid, whitefly_aphid, miner_tuta, thrips, spider_mites]
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        bbox: { $ref: '#/components/schemas/BoundingBox' }
+
+    Photo:
+      type: object
+      required: [id, x, y, h, width, height, capturedAt, originalUrl, predictions]
+      properties:
+        id: { type: string, format: uuid }
+        x: { type: number, description: Position on the 40x40 m plane (meters). }
+        y: { type: number, description: Position on the 40x40 m plane (meters). }
+        h: { type: number, description: Camera height above the floor (meters). }
+        width: { type: integer }
+        height: { type: integer }
+        capturedAt: { type: string, format: date-time }
+        originalUrl: { type: string, format: uri, description: Backend URL that streams the original from object storage. }
+        predictions:
+          type: array
+          items: { $ref: '#/components/schemas/Prediction' }
+
+    PhotoPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Photo' }
+        next_token: { type: string }
+
+    ApiError:
+      type: object
+      required: [request_id, message]
+      properties:
+        request_id: { type: string }
+        message: { type: string }
+        code: { type: string }
+
+    ValidationError:
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+      properties:
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              issue: { type: string }
+
+    NotFoundError:
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+      properties:
+        resource_id: { type: string }

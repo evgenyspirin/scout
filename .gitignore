@@ -1,0 +1,22 @@
+# Backend
+backend/bin/
+*.test
+coverage.out
+coverage.html
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+
+# Env
+.env
+backend/.env
+frontend/.env
+
+# Live-preview runtime tools/data (not part of the repo)
+.tools/
+.runtime/
+
+# OS
+.DS_Store
